@@ -53,19 +53,22 @@ let
   nixPrefix = "${termuxPrefix}/nix";
   
   # Store directory configuration
-  # These are the target paths, but Nix will respect NIX_STORE_DIR
   storeDir = "${nixPrefix}/store";
   stateDir = "${nixPrefix}/var";
   confDir = "${nixPrefix}/etc";
   
-  # Use standard Nix - no need to override store paths!
-  # We'll use environment variables (NIX_STORE_DIR, etc.) at runtime
-  #
-  # KEY INSIGHT: This is the optimization from dramforever's guide.
-  # Instead of building Nix multiple times with different --prefix configurations,
-  # we build it once and use NIX_STORE_DIR environment variable to redirect it
-  # to our custom location. This saves one entire bootstrap stage!
-  nixBoot = pkgs.nix;
+  # Build Nix with custom store paths for Termux
+  # We MUST configure these at build time because:
+  # 1. The ELF interpreter path is hardcoded in binaries (e.g., /nix/store/.../lib/ld-linux-aarch64.so.1)
+  # 2. This cannot be changed with environment variables at runtime
+  # 3. If the interpreter path points to /nix/store but files are in /data/data/com.termux/files/nix/store, binaries won't run
+  nixBoot = pkgs.nix.overrideAttrs (old: {
+    configureFlags = (old.configureFlags or []) ++ [
+      "--with-store-dir=${storeDir}"
+      "--localstatedir=${stateDir}"
+      "--sysconfdir=${confDir}"
+    ];
+  });
   
   # Collect all stdenv bootstrap stages to avoid rebuilding toolchains
   # This recursively walks back through the stdenv bootstrap process

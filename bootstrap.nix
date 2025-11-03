@@ -159,6 +159,14 @@ let
     fi
     
     echo "Creating directories..."
+    
+    # If reinstalling, make existing store writable and remove it
+    if [ -d "$STORE_DIR" ]; then
+      echo "Existing store found. Removing old installation..."
+      chmod -R u+w "$STORE_DIR" 2>/dev/null || true
+      rm -rf "$STORE_DIR"
+    fi
+    
     mkdir -p "$STORE_DIR"
     mkdir -p "$STATE_DIR/nix/db"
     mkdir -p "$STATE_DIR/nix/gcroots"

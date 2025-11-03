@@ -4,6 +4,38 @@ Bootstrap Nix package manager for Termux on Android with a custom prefix at `/da
 
 This project enables running Nix on Android devices through Termux without requiring root access or modifying `/nix`. It's specifically designed for **aarch64 (ARM64) devices only**.
 
+## Quick Installation (Termux)
+
+For users who just want to install Nix on Termux, run this one-line command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mio-19/nix-termux/main/install-nix-termux.sh | bash
+```
+
+Or if you prefer `wget`:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/mio-19/nix-termux/main/install-nix-termux.sh | bash
+```
+
+**Requirements:**
+- Android device with **aarch64 (ARM64) architecture**
+- Termux app installed
+- At least 2-3 GB free storage
+- Internet connection
+
+The script will automatically:
+1. Fetch the latest release from GitHub (via API)
+2. Download the release tarball
+3. Verify your system meets the requirements
+4. Extract and install Nix
+5. Configure your shell environment
+6. Set up necessary environment variables
+
+After installation, restart your terminal or run `source ~/.bashrc` (or `~/.zshrc`).
+
+---
+
 > **Note**: This project follows the guides at:
 > - [Bootstrapping Nix](https://dram.page/p/bootstrapping-nix/) by dramforever
 > - [Cross compilation tutorial](https://nix.dev/tutorials/cross-compilation.html) from nix.dev (official tutorial)
@@ -151,16 +183,38 @@ The output will be: `result/nix-termux-aarch64.tar.gz`
 
 ## Installation on Termux
 
-1. **Transfer the tarball to your Android device**:
+### Option 1: One-Line Install (Recommended)
+
+The easiest way to install is using the automated installer script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mio-19/nix-termux/main/install-nix-termux.sh | bash
+```
+
+Or with `wget`:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/mio-19/nix-termux/main/install-nix-termux.sh | bash
+```
+
+The script will handle everything automatically, including downloading the latest release, verifying your system, and configuring your environment.
+
+### Option 2: Manual Installation
+
+If you prefer to install manually or want more control:
+
+1. **Download the latest release tarball**:
+   
+   Visit the [releases page](https://github.com/mio-19/nix-termux/releases/latest) and download the `nix-termux-aarch64-*.tar.gz` file, or use:
+   
    ```bash
-   # Via USB, cloud storage, or directly with termux
-   # Example using curl if hosted somewhere:
-   curl -LO https://your-server.com/nix-termux-aarch64.tar.gz
+   # Example (replace with actual latest release URL from GitHub)
+   curl -LO https://github.com/mio-19/nix-termux/releases/download/dev-20251103-034509/nix-termux-aarch64-dev-20251103-034509.tar.gz
    ```
 
 2. **Extract the tarball**:
    ```bash
-   tar -xzf nix-termux-aarch64.tar.gz
+   tar -xzf nix-termux-aarch64-*.tar.gz
    cd tarball
    ```
 

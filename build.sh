@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Build script for bootstrapping Nix for Termux
-# This automates the multi-stage bootstrap process
+# This automates the cross-compilation bootstrap process
+#
+# References:
+# - https://nix.dev/tutorials/cross-compilation.html (official tutorial)
+# - https://nixos.org/manual/nixpkgs/stable/#chap-cross (official infrastructure)
+# - https://nixos.wiki/wiki/Cross_Compiling (community examples)
+# - https://matthewbauer.us/blog/beginners-guide-to-cross.html (2018 - historical context)
 
 set -euo pipefail
 
@@ -38,17 +44,27 @@ fi
 CURRENT_SYSTEM=$(nix-instantiate --eval -E 'builtins.currentSystem' | tr -d '"')
 log "Current system: $CURRENT_SYSTEM"
 
-# We need to build for aarch64-linux
-TARGET_SYSTEM="aarch64-linux"
+# Target platform configuration (following nix.dev guide)
+# Using the standard platform config string format: <cpu>-<vendor>-<os>-<abi>
+# This is the LLVM target triple format, recognized by GCC, Clang, and other toolchains
+TARGET_PLATFORM="aarch64-unknown-linux-gnu"
 
-if [ "$CURRENT_SYSTEM" != "$TARGET_SYSTEM" ]; then
-    warn "Current system ($CURRENT_SYSTEM) differs from target ($TARGET_SYSTEM)"
-    warn "Cross-compilation may be required or you may need to build on target system."
+# Note: We use 'unknown' as the vendor because:
+# 1. It's a convention for systems without a specific vendor (like PC or Apple)
+# 2. It's what config.guess returns on generic ARM Linux systems
+# 3. It matches nixpkgs' pkgsCross.aarch64-multiplatform definition
+
+if [ "$CURRENT_SYSTEM" != "aarch64-linux" ]; then
+    warn "Current system ($CURRENT_SYSTEM) differs from target (aarch64-linux)"
+    log "Will cross-compile to: $TARGET_PLATFORM"
+    log "Using crossSystem configuration as per https://nix.dev/tutorials/cross-compilation.html"
     
-    # Check if we can cross-compile
-    if ! nix-instantiate --eval -E "builtins.hasAttr \"$TARGET_SYSTEM\" (import <nixpkgs> {}).pkgsCross" &> /dev/null; then
-        error "Cross-compilation to $TARGET_SYSTEM may not be supported."
-        exit 1
+    # Check if we have binfmt support for running aarch64 binaries
+    if [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+        success "QEMU binfmt support detected - can run aarch64 binaries"
+    else
+        warn "No QEMU binfmt support detected"
+        log "This is OK - cross-compilation will work, but you won't be able to test binaries locally"
     fi
 fi
 
@@ -57,17 +73,42 @@ OUTPUT_DIR="$(pwd)/result"
 mkdir -p "$OUTPUT_DIR"
 
 log "Starting Nix bootstrap process..."
+log ""
+log "WHAT THIS SCRIPT DOES:"
+log "  1. Cross-compiles Nix and dependencies for aarch64-linux"
+log "  2. Collects all stdenv bootstrap stages (to avoid toolchain rebuilds)"
+log "  3. Bundles essential utilities (bash, coreutils, git, etc.)"
+log "  4. Creates a tarball with installation script"
+log ""
 log "This will take a while (potentially hours) as it builds:"
 log "  - Nix itself"
 log "  - All stdenv bootstrap stages"
 log "  - Essential utilities"
+log ""
+log "TECHNICAL NOTE:"
+log "  We use the NIX_STORE_DIR environment variable approach, which saves"
+log "  one bootstrap stage. Instead of rebuilding Nix for /nix/store, then"
+log "  rebuilding for our custom prefix, we build once and use env vars."
 echo ""
 
-# Stage 1: Build the installer
+# Stage 1: Build the installer using cross-compilation
 log "Building Nix installer for Termux..."
-log "Building with: nix-build bootstrap.nix -A installer --argstr system $TARGET_SYSTEM"
+log "Using crossSystem: { config = \"$TARGET_PLATFORM\"; }"
+log ""
+log "Note: This may take a LONG time (several hours) as it builds:"
+log "  - The entire GCC toolchain for aarch64"
+log "  - Glibc and system libraries"
+log "  - All stdenv bootstrap stages"
+log "  - Nix and dependencies"
+log "  - Essential utilities"
+log ""
+log "Following the cross-compilation approach from:"
+log "  https://nix.dev/tutorials/cross-compilation.html"
+log ""
 
-if nix-build bootstrap.nix -A installer --argstr system "$TARGET_SYSTEM" -o "$OUTPUT_DIR/installer"; then
+if nix-build bootstrap.nix -A installer \
+    --arg crossSystem "{ config = \"$TARGET_PLATFORM\"; }" \
+    -o "$OUTPUT_DIR/installer" 2>&1 | tee "$OUTPUT_DIR/build.log"; then
     success "Installer built successfully!"
     
     # Find the tarball

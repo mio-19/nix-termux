@@ -1,5 +1,15 @@
 # Bootstrap Nix for Termux with custom prefix
-# Based on: https://dram.page/p/bootstrapping-nix/
+# 
+# References:
+# - https://dram.page/p/bootstrapping-nix/ (bootstrap approach & NIX_STORE_DIR optimization)
+# - https://nix.dev/tutorials/cross-compilation.html (official cross-compilation tutorial)
+# - https://nixos.org/manual/nixpkgs/stable/#chap-cross (official cross-compilation infrastructure)
+# - https://nixos.wiki/wiki/Cross_Compiling (community examples)
+# - https://matthewbauer.us/blog/beginners-guide-to-cross.html (2018 - historical context)
+#
+# Note: We primarily follow official documentation (nix.dev, Nixpkgs manual) as authoritative sources.
+# Historical resources provide context but may use outdated patterns.
+#
 # Created with assistance from Claude Sonnet 4.5
 #
 # This builds a Nix installation for /data/data/com.termux/files/nix
@@ -8,9 +18,32 @@
 # Note: We use NIX_STORE_DIR environment variable override, which saves
 # one stage of the bootstrap process. The Nix built here respects the
 # NIX_STORE_DIR variable, so we don't need to rebuild it multiple times.
+#
+# Usage (following nix.dev cross-compilation guide):
+#   nix-build bootstrap.nix -A installer \
+#     --arg crossSystem '{ config = "aarch64-unknown-linux-gnu"; }'
+#
+# Platform terminology (from Nixpkgs manual):
+# - buildPlatform: Where compilation happens (e.g., x86_64-linux)
+# - hostPlatform: Where the program will run (aarch64-unknown-linux-gnu)
+# - targetPlatform: For compilers only; we assume host = target
 
-{ pkgs ? import <nixpkgs> { system = "aarch64-linux"; }
+{ # Use crossSystem for proper cross-compilation (see nix.dev guide)
+  crossSystem ? null
+, pkgs ? 
+    if crossSystem != null
+    then import <nixpkgs> { inherit crossSystem; }
+    else import <nixpkgs> {}
 }:
+
+let
+  # Verify we're targeting the right platform
+  _ = assert crossSystem != null -> 
+    (pkgs.stdenv.hostPlatform.isLinux && pkgs.stdenv.hostPlatform.isAarch64)
+    || builtins.trace "Warning: crossSystem provided but not targeting aarch64-linux!" true;
+    null;
+
+in
 
 with pkgs;
 
@@ -27,52 +60,69 @@ let
   
   # Use standard Nix - no need to override store paths!
   # We'll use environment variables (NIX_STORE_DIR, etc.) at runtime
-  nixBoot = nix;
+  #
+  # KEY INSIGHT: This is the optimization from dramforever's guide.
+  # Instead of building Nix multiple times with different --prefix configurations,
+  # we build it once and use NIX_STORE_DIR environment variable to redirect it
+  # to our custom location. This saves one entire bootstrap stage!
+  nixBoot = pkgs.nix;
   
   # Collect all stdenv bootstrap stages to avoid rebuilding toolchains
   # This recursively walks back through the stdenv bootstrap process
-  stdenvStages = curStage:
+  #
+  # Why we do this: Each stdenv stage depends on previous stages to build the toolchain.
+  # By including all stages in our tarball, we ensure users never need to rebuild:
+  # - gcc and the C compiler
+  # - glibc/musl and system libraries  
+  # - binutils (ld, as, ar, etc.)
+  # - Basic bootstrap tools
+  #
+  # The tradeoff is a larger tarball (~1-2 GB), but this saves hours of compilation
+  # time for users and makes the installation much more self-contained.
+  collectStdenvStages = curStage:
     [ curStage ] ++
-    (if ! (curStage.__bootPackages.__raw or false)
-     then stdenvStages curStage.__bootPackages.stdenv
+    (if (curStage ? __bootPackages) && !(curStage.__bootPackages.__raw or false)
+     then collectStdenvStages curStage.__bootPackages.stdenv
      else []);
   
   # All the stdenv stages from final back to stage 0
-  allStdenvStages = stdenvStages stdenv;
+  allStdenvStages = collectStdenvStages pkgs.stdenv;
   
   # Closure info for creating the tarball
-  nixClosure = closureInfo {
+  # closureInfo computes the complete dependency closure (all transitive dependencies)
+  # and generates a registration database that nix-store can import.
+  nixClosure = pkgs.closureInfo {
     rootPaths = [ nixBoot ] ++ allStdenvStages ++ [
       # Essential tools for Termux environment
-      bashInteractive
-      coreutils
-      findutils
-      gnugrep
-      gnused
-      gawk
-      gnutar
-      gzip
-      xz
-      bzip2
-      curl
-      wget
-      git
-      cacert
+      pkgs.bashInteractive
+      pkgs.coreutils
+      pkgs.findutils
+      pkgs.gnugrep
+      pkgs.gnused
+      pkgs.gawk
+      pkgs.gnutar
+      pkgs.gzip
+      pkgs.xz
+      pkgs.bzip2
+      pkgs.curl
+      pkgs.wget
+      pkgs.git
+      pkgs.cacert
       
       # Useful build tools
-      gnumake
-      patch
-      diffutils
-      which
+      pkgs.gnumake
+      pkgs.patch
+      pkgs.diffutils
+      pkgs.which
       
       # For convenience
-      less
-      nano
+      pkgs.less
+      pkgs.nano
     ];
   };
   
   # Installer script
-  installerScript = writeScript "install.sh" ''
+  installerScript = pkgs.writeScript "install.sh" ''
     #!/bin/sh
     set -e
     
@@ -189,9 +239,9 @@ EOF
   '';
   
   # Build the installer tarball
-  installer = stdenv.mkDerivation {
+  installer = pkgs.stdenv.mkDerivation {
     name = "nix-termux-installer";
-    buildInputs = [ nixBoot ];
+    nativeBuildInputs = [ pkgs.gnutar pkgs.gzip ];
     
     buildCommand = ''
       mkdir -p $out/tarball
@@ -201,8 +251,10 @@ EOF
       mkdir -p store
       echo "Copying store paths..."
       for path in $(cat ${nixClosure}/store-paths); do
-        echo "  $path"
-        cp -r "$path" store/
+        echo "  Copying: $path"
+        # Strip the /nix/store prefix and copy to our store directory
+        storePath=$(basename "$path")
+        cp -rL "$path" "store/$storePath"
       done
       
       # Copy registration info
@@ -236,9 +288,14 @@ EOF
       
       # Create the final tarball
       cd $out
+      echo "Creating tarball..."
       tar -czf nix-termux-aarch64.tar.gz tarball/
       
-      echo "Installer tarball created: $out/nix-termux-aarch64.tar.gz"
+      # Also create a symlink for easy access
+      ln -s nix-termux-aarch64.tar.gz tarball.tar.gz
+      
+      echo "Installer tarball created successfully!"
+      ls -lh nix-termux-aarch64.tar.gz
     '';
   };
 

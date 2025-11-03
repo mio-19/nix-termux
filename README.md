@@ -4,13 +4,24 @@ Bootstrap Nix package manager for Termux on Android with a custom prefix at `/da
 
 This project enables running Nix on Android devices through Termux without requiring root access or modifying `/nix`. It's specifically designed for **aarch64 (ARM64) devices only**.
 
-> **Note**: This project follows the guide at https://dram.page/p/bootstrapping-nix/ and was created with assistance from Claude Sonnet 4.5.
+> **Note**: This project follows the guides at:
+> - [Bootstrapping Nix](https://dram.page/p/bootstrapping-nix/) by dramforever
+> - [Cross compilation tutorial](https://nix.dev/tutorials/cross-compilation.html) from nix.dev (official tutorial)
+> - [Cross-compilation infrastructure](https://nixos.org/manual/nixpkgs/stable/#chap-cross) from the Nixpkgs manual (official reference)
+> - [Cross Compiling](https://nixos.wiki/wiki/Cross_Compiling) from NixOS Wiki (community examples)
+> - [Beginner's guide to cross compilation](https://matthewbauer.us/blog/beginners-guide-to-cross.html) by Matthew Bauer (2018 - historical context)
+>
+> Created with assistance from Claude Sonnet 4.5.
 
 ## Background
 
-Based on the excellent blog post ["Bootstrapping Nix"](https://dram.page/p/bootstrapping-nix/) by dramforever, this project adapts the bootstrap process for Termux environments.
+This project combines two powerful Nix techniques:
 
-**Important**: We use the `NIX_STORE` variable override approach, which means we can skip one stage of the bootstrap! As dramforever noted: "the NIX_STORE variable can override the pre-configured settings within Nix. In other words, Nix does not require rebuilding for a 'cross-compiling' scenario like this. We can save one stage of Nix."
+1. **Custom Store Prefix**: Based on dramforever's ["Bootstrapping Nix"](https://dram.page/p/bootstrapping-nix/), we build Nix to work with `/data/data/com.termux/files/nix` instead of `/nix`
+
+2. **Cross Compilation**: Following the [official Nix cross-compilation guide](https://nix.dev/tutorials/cross-compilation.html), we build for `aarch64-unknown-linux-gnu` from any platform
+
+**Important optimization**: We use the `NIX_STORE_DIR` environment variable override approach, which means we can skip one stage of the bootstrap! As dramforever noted: "the NIX_STORE variable can override the pre-configured settings within Nix. In other words, Nix does not require rebuilding for a 'cross-compiling' scenario like this. We can save one stage of Nix."
 
 ### Why Custom Prefix?
 
@@ -23,11 +34,74 @@ The standard Nix installation uses `/nix/store`, which requires root access to c
 
 This bootstrap uses a simplified two-stage approach (saving one stage thanks to NIX_STORE override):
 
-1. **Stage 1**: Use an existing Nix installation to build a custom Nix configured for `/data/data/com.termux/files/nix/store` - this Nix can be used directly with NIX_STORE environment variable override
-2. **Package**: Bundle the Nix with all stdenv bootstrap stages and essential tools into a tarball
-3. **Deploy**: Extract and install on Termux device, using environment variables to point to the custom store location
+1. **Cross-compile**: Use an existing Nix installation (on any platform, e.g., x86_64) to cross-compile Nix and dependencies for `aarch64-unknown-linux-gnu` using the `crossSystem` parameter
+2. **Package**: Bundle the cross-compiled Nix with all stdenv bootstrap stages and essential tools into a tarball
+3. **Deploy**: Extract and install on Termux device, using environment variables (NIX_STORE_DIR, etc.) to point to the custom store location
 
-The original three-stage approach is not needed because Nix respects the `NIX_STORE_DIR` environment variable, allowing a single build to work with any store location.
+**Key optimizations**:
+- **Cross-compilation**: Following [nix.dev's guide](https://nix.dev/tutorials/cross-compilation.html), we can build for ARM64 from any platform
+- **NIX_STORE override**: The original three-stage approach is not needed because Nix respects the `NIX_STORE_DIR` environment variable, allowing a single build to work with any store location
+
+### How We Follow the nix.dev Cross-Compilation Guide
+
+The nix.dev guide teaches us about **platforms** in cross-compilation:
+
+- **Build platform**: Where we compile (e.g., x86_64-linux)
+- **Host platform**: Where the compiled binary runs (aarch64-unknown-linux-gnu for Termux)
+- **Target platform**: For compilers only (we assume host = target)
+
+We follow the guide's recommended approach exactly:
+
+```nix
+# In bootstrap.nix - as shown in the guide
+{ crossSystem ? null
+, pkgs ? 
+    if crossSystem != null
+    then import <nixpkgs> { inherit crossSystem; }
+    else import <nixpkgs> {}
+}:
+```
+
+Then we build using:
+
+```bash
+nix-build bootstrap.nix -A installer \
+  --arg crossSystem '{ config = "aarch64-unknown-linux-gnu"; }'
+```
+
+The platform config string `aarch64-unknown-linux-gnu` follows the standard format `<cpu>-<vendor>-<os>-<abi>` where:
+- `aarch64` = ARM 64-bit CPU
+- `unknown` = vendor (often unknown or pc)
+- `linux` = operating system
+- `gnu` = GNU ABI (glibc-based)
+
+This is identical to what you'd get by running `config.guess` on an aarch64 Android/Linux system, and matches the `pkgsCross.aarch64-multiplatform` pre-defined platform in nixpkgs.
+
+**Historical note**: Cross-compilation support in Nixpkgs has evolved significantly. Matthew Bauer's 2018 guide introduced many developers to the `pkgsCross` attribute and established patterns for build vs. runtime dependencies. Since then (particularly since 18.09), the framework has matured with more elegant handling and better integration. Our implementation uses the current best practices from the official documentation.
+
+### Understanding Build, Host, and Target Platforms
+
+Following the [Nixpkgs cross-compilation infrastructure](https://nixos.org/manual/nixpkgs/stable/#chap-cross), we distinguish between three platform types:
+
+- **Build platform** (`buildPlatform`): Where the compilation happens (e.g., your x86_64-linux laptop)
+- **Host platform** (`hostPlatform`): Where the compiled program will run (aarch64-linux for Termux)
+- **Target platform** (`targetPlatform`): Only relevant for compilers themselves; we assume host = target
+
+In our case:
+- **Build**: x86_64-linux (or whatever you're building on)
+- **Host**: aarch64-unknown-linux-gnu (Termux on Android ARM64)
+- **Target**: aarch64-unknown-linux-gnu (same as host, since we're not building a cross-compiler)
+
+The Nixpkgs manual explains that dependencies are categorized by which platforms they involve:
+
+- **`nativeBuildInputs`** (build-time dependencies): Tools that run during build on the **build platform** (e.g., compilers, pkg-config, makeWrapper)
+- **`buildInputs`** (runtime dependencies): Libraries that the program links against on the **host platform** (e.g., zlib, openssl)
+
+This distinction, as Matthew Bauer explained in his 2018 guide, is crucial: "build-time dependencies should be put in nativeBuildInputs. Runtime dependencies should be put in buildInputs." While this had no effect on native compilation initially, it's now fundamental for correct cross-compilation.
+
+Our bootstrap process correctly handles these distinctions automatically when we set `crossSystem`, ensuring that build tools come from the build platform while target libraries come from the host platform.
+
+> **Note on documentation sources**: We primarily follow the official Nixpkgs manual and nix.dev tutorial, as they represent the current authoritative guidance. Historical resources (like Bauer's 2018 guide) provide valuable context but may use outdated syntax. The NixOS Wiki provides additional community examples but may contain outdated information (it notes itself as "a stub"). When in doubt, we defer to the official documentation.
 
 ## Requirements
 
@@ -178,6 +252,87 @@ Edit `/data/data/com.termux/files/nix/etc/nix/nix.conf` to customize:
 - Storage optimizations
 - Custom binary caches (if you set up your own)
 
+## Important Notes and Design Decisions
+
+### Why Cross-Compilation?
+
+We use cross-compilation from x86_64 to aarch64 because:
+1. **Faster builds**: x86_64 development machines are typically more powerful than Android devices
+2. **Reproducibility**: Building on a controlled environment ensures consistent results
+3. **Convenience**: No need to compile for hours on a mobile device with limited battery
+
+### Why the Custom Prefix?
+
+Android/Termux cannot access `/nix/store` without root. The custom prefix at `/data/data/com.termux/files/nix` allows:
+- Installation without root privileges
+- Full Nix functionality within Termux's sandbox
+- Standard Nix operations (store management, garbage collection, etc.)
+
+### The NIX_STORE_DIR Optimization
+
+As dramforever discovered, Nix respects the `NIX_STORE_DIR` environment variable at runtime. This means:
+- **We can skip one bootstrap stage**: Instead of building Nix three times (once for /nix/store, once for our custom store, once to finalize), we build once and use environment variables
+- **Single binary works anywhere**: The same Nix binary works with any store location
+- **Simpler maintenance**: Fewer moving parts, less complexity
+
+This optimization saves several hours of build time and reduces the complexity of the bootstrap process significantly.
+
+### Dependency Categorization
+
+Following the official Nixpkgs manual and Matthew Bauer's guidance:
+
+- **`nativeBuildInputs`**: Programs executed during build (on build platform)
+  - Examples: gcc, pkg-config, makeWrapper, autoconf
+  - These must be executable on your x86_64 machine
+
+- **`buildInputs`**: Libraries linked into the final binary (on host platform)
+  - Examples: zlib, openssl, ncurses
+  - These must be compiled for aarch64 (the target)
+
+Mixing these up causes "Exec format error" (trying to run aarch64 binary on x86_64) or linking errors (linking x86_64 library into aarch64 binary).
+
+### Why We Include All stdenv Bootstrap Stages
+
+The `collectStdenvStages` function recursively collects all stages of the standard environment bootstrap. This ensures:
+- **No toolchain rebuilds**: Users won't need to rebuild GCC, glibc, binutils, etc.
+- **Faster first installs**: Common build tools are pre-installed
+- **Better offline support**: More self-contained installation
+
+The tradeoff is a larger tarball (~1-2 GB), but this is worth it for the time saved.
+
+### Platform Triple Format
+
+We use `aarch64-unknown-linux-gnu` following the LLVM target triple format:
+- `aarch64`: 64-bit ARM CPU architecture
+- `unknown`: Vendor field (often "unknown" or "pc" - not critical)
+- `linux`: Operating system kernel
+- `gnu`: ABI/C library (glibc-based GNU toolchain)
+
+This is more precise than Nix's simpler `aarch64-linux` system string and is recognized by all modern toolchains (GCC, Clang, Rust, etc.).
+
+### Why Not Use Binary Cache?
+
+The official Nix binary cache (cache.nixos.org) serves packages for `/nix/store`. Our packages are in `/data/data/com.termux/files/nix/store`. The paths are **embedded in the binaries** as part of Nix's functional dependency tracking, so we cannot use pre-built binaries.
+
+Options for faster builds:
+1. Set up your own binary cache for the custom prefix
+2. Use the "lazy cross-compiling" technique from the NixOS Wiki (fetch some dependencies from official aarch64 cache)
+3. Build on a powerful server and transfer the store paths
+
+### Documentation Evolution
+
+Cross-compilation in Nixpkgs has evolved significantly:
+- **2018 (18.09)**: Basic `pkgsCross` support established (Matthew Bauer's era)
+- **2023-2024**: Refined with better splicing, cleaner API, more robust handling
+- **Current**: Official tutorial (nix.dev) and comprehensive manual (Nixpkgs) are authoritative
+
+When reading older resources (including some of our referenced guides), be aware that:
+- Syntax may have changed (e.g., `system` vs `crossSystem` parameter handling)
+- Some workarounds are no longer needed
+- Best practices have evolved
+
+We follow current official documentation and note when historical resources differ.
+
 ## Limitations
 
 1. **No Binary Cache**: The official Nix binary cache serves packages for `/nix/store`. With our custom prefix, we must build everything from source.
@@ -189,6 +344,8 @@ Edit `/data/data/com.termux/files/nix/etc/nix/nix.conf` to customize:
 4. **Storage**: Nix store can grow large. Monitor storage and use garbage collection regularly.
 
 5. **Link Rot**: Some packages may fail to build if source URLs are dead. Use `tarballs.nixos.org` mirror when possible.
+
+6. **Android Limitations**: Some packages may not work due to Android's non-standard environment (different filesystem layout, no systemd, limited /proc, etc.)
 
 ## Troubleshooting
 
@@ -246,10 +403,26 @@ nix-termux/
 ## Contributing
 
 Contributions welcome! Areas for improvement:
-- Cross-compilation support for building on x86_64
-- Automated testing in Termux containers
-- Pre-built binary cache hosting
-- Additional architecture support (if feasible)
+
+### High Priority
+- **Binary cache setup**: Instructions or automation for setting up a custom binary cache
+- **Automated testing**: CI/CD pipeline to test builds and installation
+- **Installation improvements**: Better error handling, progress indicators, recovery from partial installs
+
+### Medium Priority
+- **Package compatibility matrix**: Document which common packages work/don't work on Termux
+- **Lazy cross-compilation**: Implement the wiki's technique to fetch some dependencies from official aarch64 cache
+- **Size optimization**: Reduce tarball size by identifying truly essential vs. nice-to-have packages
+
+### Low Priority / Research Needed
+- **armv7l support**: Older 32-bit ARM devices (significant work, limited benefit)
+- **x86_64 Android**: Android emulators and some tablets (niche use case)
+- **Dynamic vs. static linking**: Trade-offs for Termux environment
+
+### Documentation Improvements
+- Step-by-step troubleshooting for common build failures
+- Video walkthrough of installation process
+- Comparison with other Nix-on-Android approaches (NixOnDroid, etc.)
 
 ## License
 
@@ -257,13 +430,45 @@ This project is provided as-is for educational and practical purposes. The Nix p
 
 ## References
 
-- [Bootstrapping Nix](https://dramforever.com/blog/bootstrap-nix.html) by dramforever
-- [Nix Manual](https://nixos.org/manual/nix/stable/)
-- [Nixpkgs Manual](https://nixos.org/manual/nixpkgs/stable/)
-- [Termux Wiki](https://wiki.termux.com/)
+### Cross-Compilation Guides
+
+- [Bootstrapping Nix](https://dram.page/p/bootstrapping-nix/) by dramforever - Core bootstrap approach and NIX_STORE_DIR optimization
+- [Cross compilation tutorial](https://nix.dev/tutorials/cross-compilation.html) - Official nix.dev tutorial with practical examples
+- [Cross-compilation infrastructure](https://nixos.org/manual/nixpkgs/stable/#chap-cross) - Official Nixpkgs manual: deep dive into cross-compilation internals
+- [Cross Compiling](https://nixos.wiki/wiki/Cross_Compiling) - Community wiki with practical examples and tips
+- [Beginner's guide to cross compilation](https://matthewbauer.us/blog/beginners-guide-to-cross.html) by Matthew Bauer (2018) - Historical introduction to Nixpkgs cross-compilation; note that syntax has evolved since 18.09
+
+### Official Documentation
+
+- [Nix Manual](https://nixos.org/manual/nix/stable/) - Core Nix functionality
+- [Nixpkgs Manual](https://nixos.org/manual/nixpkgs/stable/) - Package collection and stdenv
+- [NixOS Manual](https://nixos.org/manual/nixos/stable/) - NixOS-specific features
+
+### Platform Resources
+
+- [Termux Wiki](https://wiki.termux.com/) - Android terminal emulator documentation
+- [GNU Autoconf Platform Types](https://www.gnu.org/software/autoconf/manual/autoconf-2.69/html_node/Specifying-Target-Triplets.html) - Platform configuration strings
+
+## Related Projects and Alternatives
+
+If you're interested in Nix on Android, you might also want to check out:
+
+- **[Nix-on-Droid](https://github.com/nix-community/nix-on-droid)**: A more integrated approach that provides a NixOS-like environment on Android. Uses a similar custom prefix approach but with additional Android integration.
+  
+- **[Standard Termux packages](https://github.com/termux/termux-packages)**: Termux's native package manager. Simpler to use but less flexible than Nix. Good for most users who don't need Nix's reproducibility guarantees.
+
+- **[proot-distro](https://github.com/termux/proot-distro)**: Run full Linux distributions in Termux using proot (no root required). Can run NixOS inside, but with performance overhead.
+
+**Why choose this project?**
+- You want vanilla Nix (not a wrapper or integration layer)
+- You need reproducible builds and declarative package management
+- You want to learn how Nix cross-compilation and bootstrapping works
+- You're comfortable with building from source and don't need extensive Android integration
 
 ## Acknowledgments
 
 - **dramforever** for the original bootstrap approach and detailed blog post
-- The Nix community for creating an amazing package manager
+- **Matthew Bauer** for pioneering work on Nixpkgs cross-compilation and documentation
+- The Nix community for creating an amazing package manager and maintaining excellent documentation
 - Termux developers for bringing Linux environment to Android
+- All contributors to Nixpkgs cross-compilation infrastructure

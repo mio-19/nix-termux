@@ -1,65 +1,45 @@
 # Bootstrap Nix for Termux with custom prefix
 # 
 # References:
-# - https://dram.page/p/bootstrapping-nix/ (bootstrap approach & NIX_STORE_DIR optimization)
-# - https://nix.dev/tutorials/cross-compilation.html (official cross-compilation tutorial)
-# - https://nixos.org/manual/nixpkgs/stable/#chap-cross (official cross-compilation infrastructure)
-# - https://nixos.wiki/wiki/Cross_Compiling (community examples)
-# - https://matthewbauer.us/blog/beginners-guide-to-cross.html (2018 - historical context)
-#
-# Note: We primarily follow official documentation (nix.dev, Nixpkgs manual) as authoritative sources.
-# Historical resources provide context but may use outdated patterns.
+# - https://dram.page/p/bootstrapping-nix/ (bootstrap approach)
 #
 # Created with assistance from Claude Sonnet 4.5
 #
 # This builds a Nix installation for /data/data/com.termux/files/nix
-# Targeting: aarch64-linux only
+# Targeting: aarch64-linux NATIVE builds only
+#
+# IMPORTANT: This must be built ON an aarch64 system (aarch64 NixOS or GitHub Actions aarch64 runner)
 #
 # Approach: Build for /nix/store, then use patchelf to rewrite interpreter paths.
 # This avoids the complexity of multi-stage bootstrapping while ensuring binaries
 # work correctly with the custom store directory.
 #
-# Usage (following nix.dev cross-compilation guide):
-#   nix-build bootstrap.nix -A installer \
-#     --arg crossSystem '{ config = "aarch64-unknown-linux-gnu"; }'
-#
-# Platform terminology (from Nixpkgs manual):
-# - buildPlatform: Where compilation happens (e.g., x86_64-linux)
-# - hostPlatform: Where the program will run (aarch64-unknown-linux-gnu)
-# - targetPlatform: For compilers only; we assume host = target
+# Usage:
+#   nix-build bootstrap.nix -A installer
 
-{ # Use crossSystem for proper cross-compilation
-  crossSystem ? null
-, pkgs ? 
-    if crossSystem != null
-    then import <nixpkgs> { inherit crossSystem; }
-    else import <nixpkgs> {}
-}:
+{ pkgs ? import <nixpkgs> {} }:
 
 # CRITICAL UNDERSTANDING: Store Directory and ELF Interpreter Paths
 # 
-# The store directory is HARDCODED in the Nix binary itself, not in nixpkgs.
-# When Nix builds a package, it sets the store path, and this gets embedded in:
-# 1. The package's own path (e.g., /nix/store/xxx-bash-5.0)
-# 2. Dependencies' paths (e.g., references to /nix/store/yyy-glibc)
-# 3. ELF interpreter paths (e.g., /nix/store/yyy-glibc/lib/ld-linux.so)
+# The store directory is HARDCODED in the Nix binary itself.
+# ELF interpreter paths are ABSOLUTE: /nix/store/xxx-glibc/lib/ld-linux-aarch64.so.1
 #
-# The ELF interpreter path is ABSOLUTE and checked by the kernel. If a binary says
-# /nix/store/xxx/lib/ld-linux-aarch64.so.1, the kernel looks for EXACTLY that path.
+# SOLUTION: Build natively on aarch64, then use patchelf to rewrite interpreter paths.
 #
-# SOLUTION: We use patchelf in the installer to rewrite interpreter paths.
-#
-# Approach:
-# 1. Build everything with normal Nix (cross-compile to aarch64)
-#    - Binaries have interpreter: /nix/store/xxx-glibc/lib/ld-linux-aarch64.so.1
-#    - Only Nix itself is configured for custom paths
-# 2. In installer, use patchelf to rewrite ALL binaries' interpreter paths
-#    - Change /nix/store → /data/data/com.termux/files/nix/store
-# 3. Extract store to target location
-#
-# This is simpler than multi-stage bootstrap and works reliably.
+# Since we're building NATIVELY on aarch64:
+# 1. All binaries are aarch64 (no cross-compilation issues)
+# 2. We build for /nix/store normally
+# 3. Use patchelf to rewrite: /nix/store → /data/data/com.termux/files/nix/store
+# 4. Package everything into a tarball
 
 with pkgs;
+
+let
+  # Verify we're on aarch64
+  _ = assert builtins.currentSystem == "aarch64-linux"; builtins.trace "Building natively on aarch64-linux" true;
+    
+  storeDir = "/data/data/com.termux/files/nix/store";
+in
 
 let
   # Target directories for Termux  
@@ -289,40 +269,65 @@ EOF
       
       echo ""
       echo "Patching ELF interpreter paths..."
-      echo "This rewrites /nix/store -> ${storeDir} in all binaries"
+      echo "Rewriting /nix/store -> ${storeDir} in all binaries"
+      echo ""
       
       PATCHED_COUNT=0
-      TOTAL_CHECKED=0
+      TOTAL_ELF=0
+      SKIPPED_COUNT=0
       
-      # Find all potential ELF files (executables and libraries)
-      for file in $(find store -type f \( -executable -o -name '*.so*' \)); do
-        TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
-        
-        # Check if it's an ELF file
-        if file "$file" 2>/dev/null | grep -q "ELF.*executable\|ELF.*shared object"; then
-          # Try to get the interpreter path
+      # Find all ELF executables and patch them
+      while IFS= read -r file; do
+        # Check if it's an ELF file with interpreter
+        FILE_TYPE=$(file "$file" 2>/dev/null || echo "")
+        if echo "$FILE_TYPE" | grep -q "ELF.*interpreter"; then
+          TOTAL_ELF=$((TOTAL_ELF + 1))
+          
+          # Get the interpreter path
           INTERP=$(patchelf --print-interpreter "$file" 2>/dev/null || true)
           
           if [ -n "$INTERP" ] && echo "$INTERP" | grep -q "^/nix/store"; then
             # Calculate the new interpreter path
-            # Replace /nix/store with our target store directory
             NEW_INTERP=$(echo "$INTERP" | sed 's|^/nix/store|${storeDir}|')
             
-            # Check if the new interpreter exists in our copied store
-            RELATIVE_INTERP=$(echo "$NEW_INTERP" | sed 's|${storeDir}/||')
-            if [ -f "store/$RELATIVE_INTERP" ]; then
+            # Extract relative path to check if interpreter exists
+            INTERP_RELATIVE=$(echo "$INTERP" | sed 's|^/nix/store/||')
+            
+            if [ -f "store/$INTERP_RELATIVE" ] || [ -L "store/$INTERP_RELATIVE" ]; then
               # Patch the interpreter
               if patchelf --set-interpreter "$NEW_INTERP" "$file" 2>/dev/null; then
                 PATCHED_COUNT=$((PATCHED_COUNT + 1))
-                echo "  Patched: $(basename $(dirname $file))/$(basename $file)"
+                if [ $PATCHED_COUNT -le 10 ]; then
+                  echo "  ✓ $(basename $file): $NEW_INTERP"
+                elif [ $PATCHED_COUNT -eq 11 ]; then
+                  echo "  ... (showing first 10, continuing silently)"
+                fi
+              fi
+            else
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+              if [ $SKIPPED_COUNT -le 3 ]; then
+                echo "  ⚠ Skipped $(basename $file): interpreter not in closure"
               fi
             fi
           fi
         fi
-      done
+      done < <(find store -type f -executable)
       
       echo ""
-      echo "Checked $TOTAL_CHECKED files, patched $PATCHED_COUNT binaries"
+      echo "Results:"
+      echo "  Total files checked: $TOTAL_CHECKED"
+      echo "  ELF files with interpreter: $ELF_WITH_INTERP"
+      echo "  Successfully patched: $PATCHED_COUNT"
+      if [ $SKIPPED_COUNT -gt 0 ]; then
+        echo "  Skipped (interpreter not in closure): $SKIPPED_COUNT"
+      fi
+      
+      if [ $PATCHED_COUNT -eq 0 ] && [ $ELF_WITH_INTERP -gt 0 ]; then
+        echo ""
+        echo "ERROR: Found ELF files with interpreters but patched none!"
+        echo "This likely means the patching logic has a bug."
+        exit 1
+      fi
       echo ""
       
       # Copy registration info
